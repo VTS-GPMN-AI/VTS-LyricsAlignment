@@ -18,6 +18,8 @@ import json
 
 np.random.seed(7)
 
+new_rate = 22050
+
 def json2txt(json_path, save_path):
   gt = open(json_path)
   gt_json = json.load(gt)
@@ -37,20 +39,17 @@ def preprocess_from_file(audio_file, model_vocal, lyrics_file, word_file=None):
 
 def main(args):
     ls_path_audio = "./data/songs"
-    # ls_path_lyrics = args.ls_path_lyrics
-    # ls_json_lyrics = args.ls_json_lyrics
-
     # convert json to txt
     ls_json_lyrics="./data/new_labels_json"
     ls_path_lyrics="./data/new_labels_txt"
     resolution = 256 / 22050 * 3
 
-    if not os.path.isdir(ls_path_lyrics):
-      os.mkdir(ls_path_lyrics)
+    # if not os.path.isdir(ls_path_lyrics):
+    #   os.mkdir(ls_path_lyrics)
     ls_path = os.listdir(ls_json_lyrics)
-    for i, path in enumerate(ls_path):
-      _ = json2txt(os.path.join(ls_json_lyrics, path), \
-      os.path.join(ls_path_lyrics, path.replace(".json", ".txt")))
+    # for i, path in enumerate(ls_path):
+    #   _ = json2txt(os.path.join(ls_json_lyrics, path), \
+    #   os.path.join(ls_path_lyrics, path.replace(".json", ".txt")))
 
     ckp_path = args.ckp_path
     save_folder = args.save_folder
@@ -183,6 +182,7 @@ def main(args):
       json_lyrics = json.load(open(os.path.join(ls_json_lyrics, path.replace(".txt", ".json"))))
       id = 0
       lines_arr = []
+      spw = 0
       for line in json_lyrics:
         for word in line['l']:
           # If words having more than one word
@@ -213,8 +213,33 @@ def main(args):
             continue
         line['s'] = line["l"][0]["s"]
         line['e'] = line["l"][-1]["e"]
+        spw += (line['e']-line['s'])/(len(line['l']))
 
-        lines_arr.append(line)
+      spw = spw/len(json_lyrics)
+      if spw < 300:
+        for j, line in enumerate(json_lyrics):
+          for word in line['l']:
+            word['s'], word['e'] = max(word['s'] - 60, 0), max(word['e'] - 60, 0)
+          line['s'] = line['l'][0]['s']
+          line['e'] = line['l'][-1]['e']
+          lines_arr.append(line)
+          lines_arr = utils.fix_blank(lines_arr)
+      elif 300 <= spw <= 700:
+        for j, line in enumerate(json_lyrics):
+          for word in line['l']:
+            word['s'], word['e'] = max(word['s'] - 75, 0), max(word['e'] - 75, 0)
+          line['s'] = line['l'][0]['s']
+          line['e'] = line['l'][-1]['e']
+          lines_arr.append(line)
+          lines_arr = utils.fix_blank(lines_arr)
+      else:
+        for j, line in enumerate(json_lyrics):
+          for word in line['l']:
+            word['s'], word['e'] = max(word['s'] - 50, 0), max(word['e'] - 50, 0)
+          line['s'] = line['l'][0]['s']
+          line['e'] = line['l'][-1]['e']
+          lines_arr.append(line)
+          lines_arr = utils.fix_blank(lines_arr)
       
       # Saving...
       json_object = json.dumps(lines_arr, indent=4, ensure_ascii=False)
@@ -233,7 +258,7 @@ def preprocess_audio(audio_file, model_vocal, sr=22050):
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        X, curr_sr = librosa.load(audio_file, sr, False, dtype=np.float32, res_type='kaiser_fast')
+        X, curr_sr = librosa.load(audio_file, 44100, False, res_type='kaiser_fast')
 
     if X.ndim == 1:
         # mono to stereo
@@ -241,10 +266,10 @@ def preprocess_audio(audio_file, model_vocal, sr=22050):
 
     X_spec = spec_utils.wave_to_spectrogram(X, hop_length, n_fft)
     sp = Separator(model_vocal, device, batchsize, cropsize, postprocess)
-
     _, v_spec = sp.separate_tta(X_spec)
     wave = spec_utils.spectrogram_to_wave(v_spec, hop_length=hop_length)
-    y = librosa.to_mono(wave)
+    y = librosa.resample(wave, orig_sr=44100, target_sr=22050)
+    y = librosa.to_mono(y)
 
     if len(y.shape) == 1:
         y = y[np.newaxis, :] # (channel, sample)
@@ -379,9 +404,9 @@ if __name__ == '__main__':
                         help='Where all the lyrics of the vocals.')
     parser.add_argument('--ls_json_lyrics', type=str,
                         help='Where all the json lyrics format for submit')
-    parser.add_argument('--save_folder', type=str, required=True,
+    parser.add_argument('--save_folder', type=str, required=False, default="./result/",
                         help='Saving all json for submit')
-    parser.add_argument('--ckp_path', type=str, required=True,
+    parser.add_argument('--ckp_path', type=str, required=False, default="./checkpoints/checkpoint_16",
                         help='Checkpoint path for inference')
     args = parser.parse_args()
     print(args)
