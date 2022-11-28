@@ -1,0 +1,28 @@
+version: '3.7'
+
+services:
+  code:
+    build:
+      context: ..
+      dockerfile: ./docker/Dockerfile
+      network: host
+    # command: nvidia-smi
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    container_name: code
+    volumes:
+        - ../sourcecode:/code
+        - ../data:/data
+    ports:
+      - 8001:8001
+    restart: unless-stopped
+
+networks:
+  host:
+    name: host
+    external: true
