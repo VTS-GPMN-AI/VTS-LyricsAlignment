@@ -476,3 +476,26 @@ def voc_to_contour(times, resolution, total_length, smoothing=False):
             pass
 
     return contour
+
+def fix_blank(lines_arr):
+  after_blank = []
+  for i, line in enumerate(lines_arr):
+    temp = lines_arr[i-1]['e']
+    for j, word in enumerate(line['l']):
+      if (i+j) == 0:
+        word['s'] = 0
+      else:
+        blank = line['l'][j]['s'] - line['l'][j-1]['e']
+        if j == 0:
+          word['s'] = temp
+        else:
+          # current_word_len = word['e'] - word['s']
+          # last_word_len = line['l'][j-1]['e'] - line['l'][j-1]['s']
+          # word_ratio = current_word_len/last_word_len
+          word['s'] = int(line['l'][j-1]['e'] + blank*0.1)
+          line['l'][j-1]['e'] = word['s']
+    line['s'] = line["l"][0]["s"]
+    line['e'] = line["l"][-1]["e"]
+    after_blank.append(line)
+  
+  return after_blank
