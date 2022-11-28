@@ -1,4 +1,5 @@
 import warnings, librosa
+from librosa.core import yin
 import numpy as np
 from time import time
 import torch
@@ -10,26 +11,52 @@ from data import remove_accent
 from model import train_audio_transforms, AcousticModel, BoundaryDetection
 import json
 import argparse
+from lib import nets
+from lib import spec_utils
+from lib import dataset
+import json
 
 np.random.seed(7)
 
-def preprocess_from_file(audio_file, lyrics_file, word_file=None):
-    y, sr = preprocess_audio(audio_file)
+def json2txt(json_path, save_path):
+  gt = open(json_path)
+  gt_json = json.load(gt)
+  words = []
+  with open(save_path, 'w', encoding="utf-8") as f:
+    for line in gt_json:
+      words.extend([word['d'] for word in line['l']])
+      f.write(' '.join([word['d'] for word in line['l']])+' ')
+  return save_path
+
+def preprocess_from_file(audio_file, model_vocal, lyrics_file, word_file=None):
+    y, sr = preprocess_audio(audio_file, model_vocal)
 
     words, lyrics_p, idx_word_p, idx_line_p = preprocess_lyrics(lyrics_file, word_file)
 
     return y, words, lyrics_p, idx_word_p, idx_line_p
 
 def main(args):
-    ls_path_audio = args.ls_path_audio
-    ls_path_lyrics = args.ls_path_lyrics
-    ls_json_lyrics = args.ls_json_lyrics
+    ls_path_audio = "./data/songs"
+    # ls_path_lyrics = args.ls_path_lyrics
+    # ls_json_lyrics = args.ls_json_lyrics
+
+    # convert json to txt
+    ls_json_lyrics="./data/new_labels_json"
+    ls_path_lyrics="./data/new_labels_txt"
+    resolution = 256 / 22050 * 3
+
+    if not os.path.isdir(ls_path_lyrics):
+      os.mkdir(ls_path_lyrics)
+    ls_path = os.listdir(ls_json_lyrics)
+    for i, path in enumerate(ls_path):
+      _ = json2txt(os.path.join(ls_json_lyrics, path), \
+      os.path.join(ls_path_lyrics, path.replace(".json", ".txt")))
+
     ckp_path = args.ckp_path
     save_folder = args.save_folder
     cuda = True
     method="Baseline"
-
-    ls_path = os.listdir(ls_path_lyrics)
+    n_fft = 2048
 
     # constants
     resolution = 256 / 22050 * 3
@@ -69,8 +96,13 @@ def main(args):
         hparams['n_feats'], hparams['stride'], hparams['dropout']
     ).to(device)
 
+    print("Loading remove vocals models...")
+    pretrained_model = "./checkpoints/baseline.pth"
+    model_vocal = nets.CascadedNet(n_fft, 32, 128)
+    model_vocal.load_state_dict(torch.load(pretrained_model, map_location=device))
+    model_vocal.to(device)
+
     print("Loading acoustic model from checkpoint...")
-    # state = utils.load_model(ac_model, "/content/LyricsAlignment-MTL/checkpoints/checkpoint_15", cuda=(device=="gpu"))
     # state = utils.load_model(ac_model, "./checkpoints/checkpoint_{}".format(model_type), cuda=(device=="gpu"))
     state = utils.load_model(ac_model, ckp_path, cuda=(device=="gpu"))
     ac_model.eval()
@@ -84,10 +116,10 @@ def main(args):
       path = path.replace("json", "txt")
       if path == "txt_lyrics":
         continue
-      audio_file =  os.path.join(ls_path_audio, path.replace(".txt", "_Vocals.wav"))
+      audio_file =  os.path.join(ls_path_audio, path.replace(".txt", ".wav"))
       lyrics_file = os.path.join(ls_path_lyrics, path)
       
-      audio, words, lyrics_p, idx_word_p, idx_line_p = preprocess_from_file(audio_file, lyrics_file, word_file=None)
+      audio, words, lyrics_p, idx_word_p, idx_line_p = preprocess_from_file(audio_file, model_vocal, lyrics_file, word_file=None)
       # reshape input, prepare mel
       x = audio.reshape(1, 1, -1)
       x = utils.move_data_to_device(x, device)
@@ -191,10 +223,28 @@ def main(args):
       with open(os.path.join(save_folder, path.replace(".txt", ".json")), "w", encoding="utf-8") as outfile:
           outfile.write(json_object)
 
-def preprocess_audio(audio_file, sr=22050):
+def preprocess_audio(audio_file, model_vocal, sr=22050):
+    n_fft = 2048
+    hop_length = 1024
+    batchsize = 4
+    cropsize = 256
+    postprocess=True
+    device = "cuda"
+
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        y, curr_sr = librosa.load(audio_file, sr=sr, mono=True, res_type='kaiser_fast')
+        X, curr_sr = librosa.load(audio_file, sr, False, dtype=np.float32, res_type='kaiser_fast')
+
+    if X.ndim == 1:
+        # mono to stereo
+        X = np.asarray([X, X])
+
+    X_spec = spec_utils.wave_to_spectrogram(X, hop_length, n_fft)
+    sp = Separator(model_vocal, device, batchsize, cropsize, postprocess)
+
+    _, v_spec = sp.separate_tta(X_spec)
+    wave = spec_utils.spectrogram_to_wave(v_spec, hop_length=hop_length)
+    y = librosa.to_mono(wave)
 
     if len(y.shape) == 1:
         y = y[np.newaxis, :] # (channel, sample)
@@ -227,6 +277,98 @@ def preprocess_lyrics(lyrics_file, word_file=None):
     lyrics_p, words_p, idx_word_p, idx_line_p = utils.gen_phone_gt(words_lines, raw_lines)
 
     return words_lines, lyrics_p, idx_word_p, idx_line_p
+
+
+class Separator(object):
+
+    def __init__(self, model, device, batchsize, cropsize, postprocess=False):
+        self.model = model
+        self.offset = model.offset
+        self.device = device
+        self.batchsize = batchsize
+        self.cropsize = cropsize
+        self.postprocess = postprocess
+
+    def _separate(self, X_mag_pad, roi_size):
+        X_dataset = []
+        patches = (X_mag_pad.shape[2] - 2 * self.offset) // roi_size
+        for i in range(patches):
+            start = i * roi_size
+            X_mag_crop = X_mag_pad[:, :, start:start + self.cropsize]
+            X_dataset.append(X_mag_crop)
+
+        X_dataset = np.asarray(X_dataset)
+
+        self.model.eval()
+        with torch.no_grad():
+            mask = []
+            # To reduce the overhead, dataloader is not used.
+            for i in range(0, patches, self.batchsize):
+                X_batch = X_dataset[i: i + self.batchsize]
+                X_batch = torch.from_numpy(X_batch).to(self.device)
+
+                pred = self.model.predict_mask(X_batch)
+
+                pred = pred.detach().cpu().numpy()
+                pred = np.concatenate(pred, axis=2)
+                mask.append(pred)
+
+            mask = np.concatenate(mask, axis=2)
+
+        return mask
+
+    def _preprocess(self, X_spec):
+        X_mag = np.abs(X_spec)
+        X_phase = np.angle(X_spec)
+
+        return X_mag, X_phase
+
+    def _postprocess(self, mask, X_mag, X_phase):
+        if self.postprocess:
+            mask = spec_utils.merge_artifacts(mask)
+
+        y_spec = mask * X_mag * np.exp(1.j * X_phase)
+        v_spec = (1 - mask) * X_mag * np.exp(1.j * X_phase)
+
+        return y_spec, v_spec
+
+    def separate(self, X_spec):
+        X_mag, X_phase = self._preprocess(X_spec)
+
+        n_frame = X_mag.shape[2]
+        pad_l, pad_r, roi_size = dataset.make_padding(n_frame, self.cropsize, self.offset)
+        X_mag_pad = np.pad(X_mag, ((0, 0), (0, 0), (pad_l, pad_r)), mode='constant')
+        X_mag_pad /= X_mag_pad.max()
+
+        mask = self._separate(X_mag_pad, roi_size)
+        mask = mask[:, :, :n_frame]
+
+        y_spec, v_spec = self._postprocess(mask, X_mag, X_phase)
+
+        return y_spec, v_spec
+
+    def separate_tta(self, X_spec):
+        X_mag, X_phase = self._preprocess(X_spec)
+
+        n_frame = X_mag.shape[2]
+        pad_l, pad_r, roi_size = dataset.make_padding(n_frame, self.cropsize, self.offset)
+        X_mag_pad = np.pad(X_mag, ((0, 0), (0, 0), (pad_l, pad_r)), mode='constant')
+        X_mag_pad /= X_mag_pad.max()
+
+        mask = self._separate(X_mag_pad, roi_size)
+
+        pad_l += roi_size // 2
+        pad_r += roi_size // 2
+        X_mag_pad = np.pad(X_mag, ((0, 0), (0, 0), (pad_l, pad_r)), mode='constant')
+        X_mag_pad /= X_mag_pad.max()
+
+        mask_tta = self._separate(X_mag_pad, roi_size)
+        mask_tta = mask_tta[:, :, roi_size // 2:]
+        mask = (mask[:, :, :n_frame] + mask_tta[:, :, :n_frame]) * 0.5
+
+        y_spec, v_spec = self._postprocess(mask, X_mag, X_phase)
+
+        return y_spec, v_spec
 
 
 if __name__ == '__main__':
