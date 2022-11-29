@@ -44,12 +44,14 @@ def main(args):
     ls_path_lyrics="./data/new_labels_txt"
     resolution = 256 / 22050 * 3
 
-    # if not os.path.isdir(ls_path_lyrics):
-    #   os.mkdir(ls_path_lyrics)
+    if not os.path.isdir(ls_path_lyrics):
+      os.mkdir(ls_path_lyrics)
     ls_path = os.listdir(ls_json_lyrics)
-    # for i, path in enumerate(ls_path):
-    #   _ = json2txt(os.path.join(ls_json_lyrics, path), \
-    #   os.path.join(ls_path_lyrics, path.replace(".json", ".txt")))
+    for i, path in enumerate(ls_path):
+      if os.path.exists(os.path.join(ls_path_lyrics, path.replace(".json", ".txt"))):
+        continue
+      _ = json2txt(os.path.join(ls_json_lyrics, path), \
+      os.path.join(ls_path_lyrics, path.replace(".json", ".txt")))
 
     ckp_path = args.ckp_path
     save_folder = args.save_folder
@@ -117,8 +119,10 @@ def main(args):
         continue
       audio_file =  os.path.join(ls_path_audio, path.replace(".txt", ".wav"))
       lyrics_file = os.path.join(ls_path_lyrics, path)
-      
+      #try:
       audio, words, lyrics_p, idx_word_p, idx_line_p = preprocess_from_file(audio_file, model_vocal, lyrics_file, word_file=None)
+      # except Exception as e:
+      #   print(e)
       # reshape input, prepare mel
       x = audio.reshape(1, 1, -1)
       x = utils.move_data_to_device(x, device)
@@ -350,7 +354,10 @@ class Separator(object):
 
     def _postprocess(self, mask, X_mag, X_phase):
         if self.postprocess:
+          try:
             mask = spec_utils.merge_artifacts(mask)
+          except:
+            pass
 
         y_spec = mask * X_mag * np.exp(1.j * X_phase)
         v_spec = (1 - mask) * X_mag * np.exp(1.j * X_phase)
